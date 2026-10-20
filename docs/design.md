@@ -8,7 +8,9 @@
 | --- | --- |
 | `src/ssh-file-drop-send` | 転送ヘルパー（bash 3.2 互換）。UI を持たない。 |
 | `src/droplet.applescript` | ドロップレット。Host 選択、進捗、キャンセル、結果表示、クリップボード。 |
-| `scripts/build.sh` | `osacompile` で `.app` を作り、転送ヘルパーと Host 候補抽出ヘルパーを `Contents/Resources` に入れ、ad-hoc 署名する。 |
+| `scripts/build.sh` | `osacompile` で `.app` を作り、ヘルパーと `assets/AppIcon.icns` を組み込み、ad-hoc 署名する。既定アイコンが優先されるため、生成された `Assets.car` は除く。 |
+| `scripts/make-icon.sh` | `assets/icon-1024.png` から標準サイズの `.iconset` を作り、`sips` と `iconutil` で `assets/AppIcon.icns` を再生成する。通常のビルドでは再生成しない。 |
+| `scripts/install.sh` | ビルド後、インストール先のアプリを終了して待ち、`~/Applications/SSH File Drop.app` を置き換える。`SSH_FILE_DROP_INSTALL_DIR` でテスト用の保存先を指定できる。終了しない場合は 30 秒後に中止し、既存アプリを残す。待ち時間は `SSH_FILE_DROP_QUIT_TIMEOUT_SECONDS`（1〜300 秒）で変更できる。Dock と利用者の設定は変更しない。 |
 | `tests/` | ヘルパーと Host 候補抽出の自動テスト。 |
 
 ## ヘルパーの契約
