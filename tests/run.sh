@@ -23,6 +23,10 @@ if ! bash "$HERE/host-candidates.sh"; then
   echo "host candidate tests failed" >&2
   exit 1
 fi
+if ! bash "$HERE/droplet-contract.sh"; then
+  echo "droplet contract tests failed" >&2
+  exit 1
+fi
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/sfd-test.XXXXXX")
 CREATED=$T/created-dirs

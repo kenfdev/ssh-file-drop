@@ -65,9 +65,13 @@ ERR の CATEGORY: `INPUT`, `CONNECT`, `REMOTE_SETUP`, `UPLOAD`, `VERIFY`, `FINAL
 - TERM と INT を trap する。子プロセスはバックグラウンドで起動して `wait` し、trap が即時に動くようにする。
 - 子プロセスを止め、必要なら後始末をして `ERR CANCELLED` と `CLEANUP` 行を出し、130 で終了する。
 
-## ドロップレット
+## Droplet
 
-- `on open`: 入力が一つだけの通常ファイルかを確認する。複数・ディレクトリ・リンクは理由を表示して終了。
+- `on open` accepts one or more dropped items. It checks every item with `--check-file` before sending any file. If any item is not a regular file, the whole drop is rejected and the alert identifies the item and reason.
+- The user chooses one host for the entire drop. Files are sent sequentially in drop order through the unchanged single-file helper. Progress names the current file and its position.
+- Each helper call creates its own fresh remote directory, so equal basenames never overwrite one another.
+- On full success, the clipboard contains every returned remote path in drop order, separated by line breaks with no trailing line break. A one-file drop still copies one path with no trailing line break.
+- On failure or cancellation, sending stops at the current file. The helper's existing cleanup handles that file's partial remote upload. Previously completed paths are copied to the clipboard, one per line; when the first file fails, the clipboard is left unchanged. The alert identifies the failed file and reason, states the number of copied paths, and retains the helper's transfer-category and cleanup-failure details.
 - Host 一覧は `~/.config/ssh-file-drop/hosts`（1 行 1 エイリアス、`#` コメント可）。前回成功した Host は `~/.config/ssh-file-drop/last_host`。
 - 「Host を追加…」では `src/ssh-file-drop-host-candidates` が `~/.ssh/config` から候補を抽出する。Include は `~/.ssh` 基準で glob 展開し、最大深度 8 まで再帰する。同じファイルの再読込を避け、Match ブロックを無視する。`*`、`?`、先頭 `!` を含む名前と、転送ヘルパーの Host 検証に通らない名前は除く。抽出は単純な空白区切りの Include パスと glob に対応し、空白を含む引用パス、Match 条件の評価、Host パターンの実接続先への展開はしない。
 - 候補から選ぶか手入力でき、選んだ Host だけを既存の検証に通して `hosts` へ追記する。`hosts` は引き続き明示的な選択リストで、自動同期しない。SSH 設定には wildcard や実接続先ではない Host 宣言もあるため、利用者が追加を選ぶ形にする。

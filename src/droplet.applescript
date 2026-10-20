@@ -42,24 +42,38 @@ end runHelper
 
 on handleDrop(theItems)
 	activate
-	if (count of theItems) is not 1 then
-		display alert appTitle message "ファイルは一度に 1 つだけ転送できます。" & return & (count of theItems) & " 個がドロップされました。" as warning
-		return
-	end if
-	set filePath to POSIX path of (item 1 of theItems)
+	if (count of theItems) is 0 then return
+	set filePaths to {}
+	set fileNames to {}
+	repeat with droppedItem in theItems
+		set filePath to POSIX path of droppedItem
+		set checkResult to my runHelperTolerant({"--check-file", filePath})
+		set parsed to my parseOutput(checkResult)
+		if (errCategory of parsed) is not "" then
+			display alert appTitle message "This item cannot be sent:" & return & filePath & return & (errMessage of parsed) as warning
+			return
+		end if
+		set end of filePaths to filePath
+		set end of fileNames to okValue of parsed
+	end repeat
 
-	set checkResult to my runHelperTolerant({"--check-file", filePath})
-	set parsed to my parseOutput(checkResult)
-	if (errCategory of parsed) is not "" then
-		display alert appTitle message "このファイルは転送できません。" & return & (errMessage of parsed) as warning
-		return
-	end if
-	set fileName to okValue of parsed
-
-	set hostName to my chooseHost(fileName)
+	set hostName to my chooseHost(fileNames)
 	if hostName is missing value then return
 
-	my transfer(hostName, filePath, fileName)
+	set sentPaths to {}
+	set totalFiles to count of filePaths
+	repeat with fileIndex from 1 to totalFiles
+		set transferResult to my transfer(hostName, item fileIndex of filePaths, item fileIndex of fileNames, fileIndex, totalFiles)
+		set parsed to transferParsed of transferResult
+		set wasCancelled to transferCancelled of transferResult
+		if (okValue of parsed) is not "" then
+			set end of sentPaths to okValue of parsed
+		else
+			my reportFailure(parsed, hostName, item fileIndex of fileNames, wasCancelled, sentPaths)
+			return
+		end if
+	end repeat
+	my finishSuccess(my joinLines(sentPaths), hostName)
 end handleDrop
 
 -- 終了コードが 0 以外でも標準出力を受け取る。
@@ -82,7 +96,7 @@ on lastHost()
 end lastHost
 
 -- 戻り値は選ばれた Host。キャンセルなら missing value。
-on chooseHost(fileName)
+on chooseHost(fileNames)
 	set preferred to my lastHost()
 	repeat
 		set hosts to my listHosts()
@@ -93,8 +107,8 @@ on chooseHost(fileName)
 		else if (count of hosts) > 0 then
 			set defaultItem to item 1 of hosts
 		end if
-		set promptText to "ファイル: " & fileName & return & "転送先の Host を選んでください。"
-		if (count of hosts) is 0 then set promptText to promptText & return & "まだ Host が登録されていません。"
+		set promptText to "Files: " & my joinLines(fileNames) & return & "Choose a host for this drop."
+		if (count of hosts) is 0 then set promptText to promptText & return & "No hosts are registered yet."
 		set picked to choose from list choices with title appTitle with prompt promptText default items {defaultItem} OK button name "転送" cancel button name "キャンセル"
 		if picked is false then return missing value
 		set choice to item 1 of picked
@@ -136,7 +150,7 @@ on promptForHost()
 	return text returned of answer
 end promptForHost
 
-on transfer(hostName, filePath, fileName)
+on transfer(hostName, filePath, fileName, fileIndex, totalFiles)
 	set workDir to do shell script "/usr/bin/mktemp -d /tmp/ssh-file-drop-ui.XXXXXX"
 	set outFile to workDir & "/out"
 	set pidFile to workDir & "/pid"
@@ -149,8 +163,8 @@ on transfer(hostName, filePath, fileName)
 	set cancelled to false
 	try
 		set progress total steps to -1
-		set progress description to "転送中: " & fileName
-		set progress additional description to "転送先: " & hostName & "  (Stop で中止)"
+		set progress description to "Sending " & fileIndex & " of " & totalFiles & ": " & fileName
+		set progress additional description to "Host: " & hostName & "  (Stop to cancel)"
 		repeat until my fileExists(rcFile)
 			delay 0.3
 		end repeat
@@ -170,7 +184,7 @@ on transfer(hostName, filePath, fileName)
 	do shell script "/bin/rm -f " & quoted form of outFile & " " & quoted form of pidFile & " " & quoted form of rcFile & "; /bin/rmdir " & quoted form of workDir & " 2>/dev/null; true"
 
 	set parsed to my parseOutput(outText)
-	my report(parsed, hostName, fileName, cancelled)
+	return {transferParsed:parsed, transferCancelled:cancelled}
 end transfer
 
 on fileExists(p)
@@ -220,39 +234,53 @@ on cleanupNote(state)
 	return ""
 end cleanupNote
 
-on report(parsed, hostName, fileName, cancelled)
+on reportFailure(parsed, hostName, fileName, cancelled, sentPaths)
 	activate
-	set okVal to okValue of parsed
-	if okVal is not "" then
-		my finishSuccess(okVal, hostName)
-		return
-	end if
-
 	set cat to errCategory of parsed
 	set noteText to my cleanupNote(cleanupState of parsed)
-	if cancelled or cat is "CANCELLED" then
-		display alert appTitle message "転送を中止しました。クリップボードは変更していません。" & noteText as informational
-		return
-	end if
-
+	set copyResult to my copyPartial(sentPaths)
+	set copiedCount to copiedCount of copyResult
+	set clipboardNote to copyNote of copyResult
 	set detail to errMessage of parsed
 	if cat is "" then
-		set body to "ヘルパーが結果を返しませんでした。クリップボードは変更していません。"
+		set body to "The helper did not return a result."
 	else if cat is "CONNECT" then
-		set body to "接続できませんでした。" & return & return & "Terminal で次を実行し、接続とホスト鍵の確認ができるか試してください。" & return & "ssh " & hostName & return & return & "Terminal では成功するのにこのアプリで失敗する場合は、SSH エージェントがアプリから見えていない可能性があります。~/.ssh/config の IdentityAgent や AddKeysToAgent を確認してください。" & return & return & "詳細: " & detail
+		set body to "Could not connect. In Terminal, run ssh " & hostName & " to check the connection and host key." & return & return & "If that works but this app fails, the app may not see your SSH agent. Check IdentityAgent or AddKeysToAgent in ~/.ssh/config." & return & return & "Details: " & detail
 	else if cat is "REMOTE_SETUP" then
-		set body to "転送先に作業用ディレクトリを作れませんでした。空き容量と権限を確認してください。" & return & return & "詳細: " & detail
+		set body to "Could not create a work directory on the host. Check free space and permissions." & return & return & "Details: " & detail
 	else if cat is "UPLOAD" then
-		set body to "アップロードに失敗しました。通信が切れたか、転送先の容量が足りない可能性があります。" & return & return & "詳細: " & detail
+		set body to "Upload failed. The connection may have dropped or the host may be out of space." & return & return & "Details: " & detail
 	else if cat is "VERIFY" then
-		set body to "転送内容を確認できませんでした。パスは出していません。" & return & return & "詳細: " & detail
+		set body to "Transfer verification failed. No path was returned." & return & return & "Details: " & detail
 	else if cat is "FINALIZE" then
-		set body to "ファイルの確定に失敗しました。パスは出していません。" & return & return & "詳細: " & detail
+		set body to "Could not finalize the file. No path was returned." & return & return & "Details: " & detail
+	else if cat is "CANCELLED" or cancelled then
+		set body to "Transfer was cancelled."
 	else
 		set body to detail
 	end if
+	set body to "File: " & fileName & return & body & return & return & copiedCount & " path(s) copied to the clipboard." & clipboardNote
 	display alert appTitle message body & noteText as critical
-end report
+end reportFailure
+
+on copyPartial(sentPaths)
+	if (count of sentPaths) is 0 then return {copiedCount:0, copyNote:" The clipboard was left unchanged."}
+	try
+		set joinedPaths to my joinLines(sentPaths)
+		set the clipboard to joinedPaths
+		if (the clipboard as text) is joinedPaths then return {copiedCount:(count of sentPaths), copyNote:""}
+	on error
+	end try
+	return {copiedCount:0, copyNote:" The clipboard could not be updated; no paths were copied."}
+end copyPartial
+
+on joinLines(theLines)
+	set savedDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to linefeed
+	set joined to theLines as text
+	set AppleScript's text item delimiters to savedDelims
+	return joined
+end joinLines
 
 on finishSuccess(remotePath, hostName)
 	set copied to false
