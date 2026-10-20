@@ -1,0 +1,278 @@
+#!/bin/bash
+# ssh-file-drop-send HOST FILE
+# Sends one regular file to a fresh 0700 directory under /tmp on HOST.
+# stdout protocol (tab separated): "OK<TAB>path" or "ERR<TAB>CATEGORY<TAB>message" + "CLEANUP<TAB>state".
+# See docs/design.md.
+
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C
+
+SSH=/usr/bin/ssh
+SCP=/usr/bin/scp
+PARTIAL_NAME=.ssh-file-drop.partial
+HOST_RE='^[A-Za-z0-9_][A-Za-z0-9._@+-]*$'
+DIR_RE='^/tmp/ssh-file-drop\.[A-Za-z0-9]+$'
+
+# Phases only move forward. cleanup_remote decides what is safe from the phase.
+PHASE=VALIDATE
+OWNED_DIR=
+CHILD_PID=
+WORK_DIR=
+CLEANUP_STATE=none
+CANCELLED=0
+
+COMMON_OPTS=(
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=5
+  -o ServerAliveCountMax=3
+  -o ClearAllForwardings=yes
+  -o ControlMaster=no
+)
+if [ -n "${SSH_FILE_DROP_SSH_CONFIG:-}" ]; then
+  COMMON_OPTS=(-F "$SSH_FILE_DROP_SSH_CONFIG" "${COMMON_OPTS[@]}")
+fi
+
+valid_host() {
+  [[ $1 =~ $HOST_RE ]]
+}
+
+if [ "${1:-}" = "--check-host" ]; then
+  if [ $# -eq 2 ] && valid_host "$2"; then
+    exit 0
+  fi
+  exit 2
+fi
+
+CONFIG_DIR=${SSH_FILE_DROP_CONFIG_DIR:-$HOME/.config/ssh-file-drop}
+HOSTS_FILE=$CONFIG_DIR/hosts
+LAST_HOST_FILE=$CONFIG_DIR/last_host
+
+list_hosts() {
+  local line
+  [ -r "$HOSTS_FILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case $line in '' | '#'*) continue ;; esac
+    valid_host "$line" && printf '%s\n' "$line"
+  done <"$HOSTS_FILE"
+}
+
+# Only a host that passed validation is ever written, so the file stays one alias per line.
+add_host() {
+  valid_host "$1" || return 2
+  list_hosts | grep -qxF -- "$1" && return 0
+  mkdir -p "$CONFIG_DIR" && printf '%s\n' "$1" >>"$HOSTS_FILE"
+}
+
+remember_host() {
+  mkdir -p "$CONFIG_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$1" >"$LAST_HOST_FILE.tmp.$$" 2>/dev/null && mv -f "$LAST_HOST_FILE.tmp.$$" "$LAST_HOST_FILE" 2>/dev/null
+  rm -f "$LAST_HOST_FILE.tmp.$$" 2>/dev/null
+  return 0
+}
+
+case "${1:-}" in
+  --list-hosts) list_hosts; exit 0 ;;
+  --last-host)
+    if [ -r "$LAST_HOST_FILE" ]; then
+      IFS= read -r last <"$LAST_HOST_FILE"
+      valid_host "$last" && printf '%s\n' "$last"
+    fi
+    exit 0
+    ;;
+  --add-host)
+    [ $# -eq 2 ] || exit 2
+    add_host "$2"
+    exit $?
+    ;;
+esac
+
+# Single-quote a value for a POSIX-style remote shell.
+sq() {
+  local quote="'"
+  local replacement="'\\''"
+  local s=$1
+  printf "'%s'" "${s//$quote/$replacement}"
+}
+
+# Text that came from ssh/scp is untrusted: one line, printable ASCII only.
+tail_of() {
+  tr -c '[:print:]' ' ' <"$1" | tr -s ' ' | cut -c1-300
+}
+
+remote_cmd() {
+  local script=$1
+  shift
+  local out="sh -c $(sq "$script") sh"
+  local arg
+  for arg in "$@"; do
+    out="$out $(sq "$arg")"
+  done
+  printf '%s' "$out"
+}
+
+run_child() {
+  "$@" >"$WORK_DIR/out" 2>"$WORK_DIR/err" </dev/null &
+  CHILD_PID=$!
+  wait "$CHILD_PID"
+  local rc=$?
+  CHILD_PID=
+  return "$rc"
+}
+
+run_remote() {
+  local script=$1
+  shift
+  run_child "$SSH" "${COMMON_OPTS[@]}" -T -- "$HOST" "$(remote_cmd "$script" "$@")"
+}
+
+cleanup_local() {
+  if [ -n "$WORK_DIR" ]; then
+    rm -f "$WORK_DIR/out" "$WORK_DIR/err"
+    rmdir "$WORK_DIR" 2>/dev/null
+  fi
+}
+
+# Removes only the partial file and then the directory this run created.
+# rmdir refuses a non-empty directory, so a finished file is never deleted.
+cleanup_remote() {
+  CLEANUP_STATE=none
+  case $PHASE in
+    VALIDATE) return 0 ;;
+    MKDIR)
+      if [ -z "$OWNED_DIR" ]; then
+        [ "$CANCELLED" = 1 ] && CLEANUP_STATE=unknown
+        return 0
+      fi
+      ;;
+    FINALIZE) CLEANUP_STATE=unknown; return 0 ;;
+  esac
+  [ -n "$OWNED_DIR" ] || return 0
+  [[ $OWNED_DIR =~ $DIR_RE ]] || { CLEANUP_STATE=unknown; return 0; }
+  local script='if [ -d "$1" ]; then rm -f -- "$1/$2" && rmdir -- "$1"; fi'
+  COMMON_OPTS=("${COMMON_OPTS[@]}" -o ConnectTimeout=5 -o ServerAliveCountMax=2)
+  if run_remote "$script" "$OWNED_DIR" "$PARTIAL_NAME"; then
+    CLEANUP_STATE=done
+  else
+    CLEANUP_STATE=failed
+  fi
+}
+
+fail() {
+  local category=$1 code=$2 message=$3
+  cleanup_remote
+  cleanup_local
+  printf 'ERR\t%s\t%s\n' "$category" "$message"
+  printf 'CLEANUP\t%s\n' "$CLEANUP_STATE"
+  exit "$code"
+}
+
+on_signal() {
+  CANCELLED=1
+  trap '' TERM INT HUP
+  if [ -n "$CHILD_PID" ]; then
+    kill "$CHILD_PID" 2>/dev/null
+    wait "$CHILD_PID" 2>/dev/null
+    CHILD_PID=
+  fi
+  fail CANCELLED 130 "キャンセルしました"
+}
+
+# ---- VALIDATE ----
+
+validate_file() {
+  case $FILE in
+    /*) ;;
+    *) FILE="$PWD/$FILE" ;;
+  esac
+  case $FILE in
+    *[[:cntrl:]]*) fail INPUT 2 "ファイル名に改行や制御文字が含まれているため、転送しません" ;;
+  esac
+  [ -L "$FILE" ] && fail INPUT 2 "シンボリックリンクは転送しません"
+  [ -e "$FILE" ] || fail INPUT 2 "ファイルが見つかりません"
+  [ -d "$FILE" ] && fail INPUT 2 "ディレクトリは転送しません"
+  [ -f "$FILE" ] || fail INPUT 2 "通常のファイルではないため、転送しません"
+  [ -r "$FILE" ] || fail INPUT 2 "ファイルを読み取れません"
+
+  BASE=${FILE##*/}
+  [ "${#BASE}" -le 255 ] || fail INPUT 2 "ファイル名が 255 バイトを超えています"
+  [ "$BASE" != "$PARTIAL_NAME" ] || fail INPUT 2 "このファイル名は予約されています"
+
+  SIG_BEFORE=$(stat -f '%z %Fm %i' -- "$FILE") || fail INPUT 2 "ファイルの状態を取得できません"
+  SIZE=${SIG_BEFORE%% *}
+}
+
+if [ "${1:-}" = "--check-file" ]; then
+  [ $# -eq 2 ] || fail INPUT 2 "使い方: ssh-file-drop-send --check-file FILE"
+  FILE=$2
+  validate_file
+  printf 'OK\t%s\n' "$BASE"
+  exit 0
+fi
+
+[ $# -eq 2 ] || fail INPUT 2 "使い方: ssh-file-drop-send HOST FILE"
+HOST=$1
+FILE=$2
+
+valid_host "$HOST" || fail INPUT 2 "Host 名に使えない文字が含まれています"
+validate_file
+
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ssh-file-drop.XXXXXX") || fail INPUT 2 "作業用ディレクトリを作れません"
+trap on_signal TERM INT HUP
+trap cleanup_local EXIT
+
+# ---- MKDIR ----
+
+PHASE=MKDIR
+script='umask 077 && d=$(mktemp -d /tmp/ssh-file-drop.XXXXXXXX) && chmod 700 "$d" && printf "%s\n" "$d"'
+run_remote "$script"
+rc=$?
+if [ "$rc" -eq 255 ]; then
+  fail CONNECT 3 "接続できませんでした。$(tail_of "$WORK_DIR/err")"
+elif [ "$rc" -ne 0 ]; then
+  fail REMOTE_SETUP 4 "転送先に作業ディレクトリを作れませんでした。$(tail_of "$WORK_DIR/err")"
+fi
+REPORTED=$(cat "$WORK_DIR/out")
+[[ $REPORTED =~ $DIR_RE ]] || fail REMOTE_SETUP 4 "転送先が想定外の出力を返しました"
+OWNED_DIR=$REPORTED
+
+# ---- UPLOAD ----
+
+PHASE=UPLOAD
+if ! run_child "$SCP" "${COMMON_OPTS[@]}" -q -- "$FILE" "$HOST:$OWNED_DIR/$PARTIAL_NAME"; then
+  fail UPLOAD 5 "アップロードに失敗しました。$(tail_of "$WORK_DIR/err")"
+fi
+
+# ---- VERIFY ----
+
+PHASE=VERIFY
+SIG_AFTER=$(stat -f '%z %Fm %i' -- "$FILE") || fail VERIFY 6 "転送後にファイルの状態を取得できません"
+[ "$SIG_AFTER" = "$SIG_BEFORE" ] || fail VERIFY 6 "転送中に元のファイルが変更されたため、中止しました"
+
+if ! run_remote 'cd -- "$1" && wc -c < "$2"' "$OWNED_DIR" "$PARTIAL_NAME"; then
+  fail VERIFY 6 "転送先のサイズを確認できませんでした。$(tail_of "$WORK_DIR/err")"
+fi
+REMOTE_SIZE=$(tr -d '[:space:]' <"$WORK_DIR/out")
+[ "$REMOTE_SIZE" = "$SIZE" ] || fail VERIFY 6 "転送先のサイズが一致しません (元 $SIZE バイト、転送先 ${REMOTE_SIZE:-不明})"
+
+# ---- FINALIZE ----
+
+PHASE=FINALIZE
+script='cd -- "$1" && chmod 600 "$2" && mv -- "$2" "$3" && [ -f "$3" ]'
+run_remote "$script" "$OWNED_DIR" "$PARTIAL_NAME" "$BASE"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  # A remote command failure (not a dropped connection) means the rename did not complete.
+  [ "$rc" -ne 255 ] && PHASE=VERIFY
+  fail FINALIZE 7 "ファイルの確定に失敗しました。$(tail_of "$WORK_DIR/err")"
+fi
+
+PHASE=DONE
+remember_host "$HOST"
+cleanup_local
+printf 'OK\t%s\n' "$OWNED_DIR/$BASE"
+exit 0
