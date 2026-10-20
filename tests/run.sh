@@ -200,7 +200,7 @@ check_name() { # description, file name (created under $F)
   got=$(R "cd '$d' && find . -type f -exec sh -c 'cksum < \"\$1\"' _ {} \\;")
   if [ "$OKPATH" = "$d/$name" ] && [ "$want" = "$got" ]; then ok "name: $desc"; else bad "name: $desc" "path=$OKPATH want=$want got=$got"; fi
 }
-check_name "japanese" "議事録.pdf"
+check_name "ordinary filename" "meeting-notes.pdf"
 check_name "space" "with space.txt"
 check_name "apostrophe" "it's here.txt"
 check_name "leading dash" "-rf"

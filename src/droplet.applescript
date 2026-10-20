@@ -1,12 +1,12 @@
--- SSH File Drop: ファイルをドロップすると SSH 接続先の /tmp へ送り、リモートの絶対パスをクリップボードに入れる。
--- 転送の処理はすべて Contents/Resources/ssh-file-drop-send が行う。ここは画面と結果の受け取りだけを担当する。
+-- SSH File Drop sends dropped files to /tmp on an SSH host and copies their remote paths to the clipboard.
+-- The helper in Contents/Resources/ssh-file-drop-send handles transfers; this script handles the UI and results.
 
 property appTitle : "SSH File Drop"
-property addHostItem : "＋ Host を追加…"
+property addHostItem : "+ Add Host..."
 
 on run
 	activate
-	display dialog "このアプリのアイコンへ、転送したいファイルを 1 つドロップしてください。" & return & return & "Host の一覧は ~/.config/ssh-file-drop/hosts に 1 行 1 つで書くか、ドロップ後の画面で追加できます。" with title appTitle buttons {"OK"} default button 1
+	display dialog "Drop one or more files onto this app's icon to send them." & return & return & "List hosts one per line in ~/.config/ssh-file-drop/hosts, or add them after dropping files." with title appTitle buttons {"OK"} default button 1
 end run
 
 on open theItems
@@ -15,7 +15,7 @@ on open theItems
 	on error errMsg number errNum
 		if errNum is not -128 then
 			activate
-			display alert appTitle message "予期しないエラーが起きました。" & return & errMsg as critical
+			display alert appTitle message "An unexpected error occurred." & return & errMsg as critical
 		end if
 	end try
 end open
@@ -76,7 +76,7 @@ on handleDrop(theItems)
 	my finishSuccess(my joinLines(sentPaths), hostName)
 end handleDrop
 
--- 終了コードが 0 以外でも標準出力を受け取る。
+-- Capture stdout even when the helper exits with a nonzero status.
 on runHelperTolerant(args)
 	set cmd to quoted form of my helperPath()
 	repeat with a in args
@@ -95,7 +95,7 @@ on lastHost()
 	return my runHelper({"--last-host"})
 end lastHost
 
--- 戻り値は選ばれた Host。キャンセルなら missing value。
+-- Returns the selected host, or missing value if cancelled.
 on chooseHost(fileNames)
 	set preferred to my lastHost()
 	repeat
@@ -109,7 +109,7 @@ on chooseHost(fileNames)
 		end if
 		set promptText to "Files: " & my joinLines(fileNames) & return & "Choose a host for this drop."
 		if (count of hosts) is 0 then set promptText to promptText & return & "No hosts are registered yet."
-		set picked to choose from list choices with title appTitle with prompt promptText default items {defaultItem} OK button name "転送" cancel button name "キャンセル"
+		set picked to choose from list choices with title appTitle with prompt promptText default items {defaultItem} OK button name "Transfer" cancel button name "Cancel"
 		if picked is false then return missing value
 		set choice to item 1 of picked
 		if choice is not addHostItem then return choice
@@ -126,9 +126,9 @@ on addHost()
 		set rawCandidates to my runCandidateExtractor()
 		if rawCandidates is not "" then set candidates to paragraphs of rawCandidates
 	end try
-	set manualItem to "手入力…"
+	set manualItem to "Enter Manually..."
 	if (count of candidates) > 0 then
-		set pickedCandidate to choose from list (candidates & {manualItem}) with title appTitle with prompt "~/.ssh/config の Host 候補を選ぶか、手入力してください。" OK button name "追加" cancel button name "キャンセル"
+		set pickedCandidate to choose from list (candidates & {manualItem}) with title appTitle with prompt "Choose a host from ~/.ssh/config or enter one manually." OK button name "Add" cancel button name "Cancel"
 		if pickedCandidate is false then return missing value
 		set newHost to item 1 of pickedCandidate
 		if newHost is manualItem then set newHost to my promptForHost()
@@ -140,13 +140,13 @@ on addHost()
 		my runHelper({"--add-host", newHost})
 		return newHost
 	on error
-		display alert appTitle message "この名前は使えません。" & return & "英数字と . _ @ + - だけで、先頭は英数字か _ にしてください。" as warning
+		display alert appTitle message "This host name is not allowed." & return & "Use letters, digits, and . _ @ + -. The first character must be a letter, digit, or _." as warning
 		return missing value
 	end try
 end addHost
 
 on promptForHost()
-	set answer to display dialog "~/.ssh/config に書いてある Host の名前を入力してください。" & return & "(例: dev-server)" default answer "" with title appTitle buttons {"キャンセル", "追加"} default button 2 cancel button 1
+	set answer to display dialog "Enter a host name from ~/.ssh/config." & return & "(Example: dev-server)" default answer "" with title appTitle buttons {"Cancel", "Add"} default button 2 cancel button 1
 	return text returned of answer
 end promptForHost
 
@@ -191,7 +191,7 @@ on fileExists(p)
 	return (do shell script "/bin/test -e " & quoted form of p & " && echo y || echo n") is "y"
 end fileExists
 
--- ヘルパーへ TERM を送り、後始末が終わるまで待つ。
+-- Send TERM to the helper and wait for cleanup to finish.
 on stopHelper(pidFile, rcFile)
 	try
 		set helperPid to do shell script "/bin/cat " & quoted form of pidFile
@@ -229,8 +229,8 @@ on parseOutput(outText)
 end parseOutput
 
 on cleanupNote(state)
-	if state is "failed" then return return & return & "リモートに未完成のファイルが残っている可能性があります。接続できるときに /tmp/ssh-file-drop.* を確認してください。"
-	if state is "unknown" then return return & return & "リモートの後始末を確認できませんでした。/tmp/ssh-file-drop.* に空のディレクトリや未完成のファイルが残っている可能性があります。"
+	if state is "failed" then return return & return & "An incomplete file may remain on the host. When connected, check /tmp/ssh-file-drop.*."
+	if state is "unknown" then return return & return & "Remote cleanup could not be confirmed. An empty directory or incomplete file may remain under /tmp/ssh-file-drop.*."
 	return ""
 end cleanupNote
 
@@ -292,8 +292,8 @@ on finishSuccess(remotePath, hostName)
 				exit repeat
 			end if
 		end try
-		set answer to display dialog "転送は完了しましたが、クリップボードにコピーできませんでした。" & return & return & remotePath with title appTitle buttons {"閉じる", "もう一度コピー"} default button 2 cancel button 1
-		-- 「閉じる」は取り消しエラーになり、そのまま終了する。転送は再実行しない。
+		set answer to display dialog "The transfer finished, but the path could not be copied to the clipboard." & return & return & remotePath with title appTitle buttons {"Close", "Copy Again"} default button 2 cancel button 1
+		-- Close raises a cancellation error and exits. Do not repeat the transfer.
 	end repeat
-	display dialog "転送しました。パスをクリップボードにコピーしました。" & return & return & remotePath & return & return & "転送先: " & hostName with title appTitle buttons {"OK"} default button 1 giving up after 15
+	display dialog "Transfer complete. The path was copied to the clipboard." & return & return & remotePath & return & return & "Host: " & hostName with title appTitle buttons {"OK"} default button 1 giving up after 15
 end finishSuccess

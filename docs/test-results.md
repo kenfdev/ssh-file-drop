@@ -1,41 +1,44 @@
-# テスト結果
+# Test Results
 
-macOS 26.5（build 25F71）、OpenSSH 10.2p1 の実機でテストしました。SSH 統合テストの接続先は同じ Mac の `localhost:22` で、リモート OS は `Darwin 25.5.0` と報告されました。この結果は Finder や Dock からのファイルドロップを検証するものではありません。
+Test date: 2026-10-20. Tested app source: working tree based on commit `c372080`; the project has no separately numbered app version.
 
-## 実機で実行したテスト
+Tests ran on macOS 26.5 (build 25F71) with OpenSSH 10.2p1. SSH integration tests connected to `localhost:22` on the same Mac, which reported remote OS `Darwin 25.5.0`. These tests do not verify dropping files through Finder or the Dock.
 
-| `docs/brief.md` §7 の受け入れ項目 | 実行コマンドと結果 |
+## Executed tests
+
+| Acceptance area | Command and result |
 | --- | --- |
-| 通常・空・大きなファイルを転送し、パス、内容、権限を確認する。 | `bash tests/run.sh` — PASS。200 MiB のチェックサムが一致し、空ファイルと通常ファイルも成功。リモートディレクトリは `0700`、完成ファイルは `0600`。全体は `passed: 61  failed: 0  skipped: 0`。 |
-| 日本語、空白、アポストロフィ、先頭ハイフン、コマンド置換文字列、セミコロンを含む名前がコマンドとして実行されず、同名再転送で既存ファイルを上書きしない。 | `bash tests/run.sh` — PASS。これらに加えて複数の名前を試し、転送内容、注入を示すファイルが作られないこと、同名ファイルが別パスになり両方の内容が保たれることを確認。 |
-| ディレクトリ、シンボリックリンク、複数入力を拒否する。 | `bash tests/run.sh` — ヘルパーの応答は PASS。いずれも成功パスを返さず入力拒否。ドロップレットが表示する警告は未テスト。 |
-| 未知・変更済みホスト鍵、認証失敗、接続拒否、到達不能アドレスで成功パスを返さない。設定で `StrictHostKeyChecking=no` を指定しても拒否する。 | `bash tests/run.sh` — ヘルパーの全ケースが PASS。未知鍵のテストでは一時 known-hosts ファイルが変更されないことも確認し、到達不能アドレスは30秒以内に終了。 |
-| 転送中に元ファイルが変更された場合は成功扱いにせず、所有する未完成ディレクトリを削除する。 | `bash tests/run.sh` — PASS。ヘルパーは検証エラーと成功パスなしを返し、後始末完了を報告。 |
-| 転送中のキャンセルで成功パスを返さず、所有するディレクトリを削除する。 | `bash tests/run.sh` — PASS。アップロード中のヘルパーに TERM を送り、終了コード130と後始末完了を確認。アプリの Stop ボタンは未テスト。 |
-| 転送中の接続断で成功パスを返さず、後始末失敗を報告する。 | `bash tests/run.sh` — PASS。ヘルパーはアップロード失敗と `CLEANUP failed` を返した。テストは未完成ディレクトリが1つ残ったことを確認後、テストデータとして削除。 |
-| SSH 設定からの Host 候補抽出。 | `bash tests/host-candidates.sh` — PASS、`host candidates passed: 4  failed: 0`。`bash tests/run.sh` も同じ4項目を実行。 |
-| アプリのビルド、インストール、署名、置換時の安全策、hosts ファイル保持。 | `bash tests/install.sh` — PASS、`install passed: 20  failed: 0`。一時ホームにビルド・署名済みアプリをインストールして起動し、System Events で説明ダイアログを閉じ、置換と拒否のケースを確認。利用者のインストール先や SSH 設定は変更していない。 |
+| Transfer empty, regular, and large files; verify paths, contents, and permissions. | `bash tests/run.sh` passed. The 200 MiB checksum matched; empty and regular files also passed. Remote directories were mode `0700` and completed files were mode `0600`. Final count: `passed: 61  failed: 0  skipped: 0`. |
+| Ensure special file names are not executed as commands and repeat transfers do not overwrite existing files. | `bash tests/run.sh` passed for spaces, apostrophes, leading hyphens, command substitutions, semicolons, backticks, quotes, glob characters, emoji, and other names. No injection marker files were created. Repeated names used separate paths and preserved both contents. |
+| Reject folders, symbolic links, multiple helper inputs, and invalid host names. | `bash tests/run.sh` passed. The helper rejects multiple arguments. The droplet checks every dropped item before starting transfers and rejects the entire drop if any item is not a regular file. |
+| Reject unknown or changed host keys, authentication failures, refused connections, and unreachable hosts. | `bash tests/run.sh` passed for all cases, including a check that an unknown host key does not change the temporary known-hosts file. The unreachable address failed within 30 seconds. |
+| Detect a source file changed during transfer and clean up its owned incomplete directory. | `bash tests/run.sh` passed. The helper returned a verification failure without an OK path and reported successful cleanup. |
+| Cancel an active transfer and clean up its owned incomplete directory. | `bash tests/run.sh` passed. Sending TERM to the helper returned status 130 and completed cleanup. The app's progress Stop button was not exercised. |
+| Report cleanup failure after a connection cut. | `bash tests/run.sh` passed. The helper returned an upload failure and `CLEANUP failed`; the test observed the one leftover directory and removed its test data afterward. |
+| Extract host candidates from SSH configuration. | `bash tests/host-candidates.sh` passed: `host candidates passed: 4  failed: 0`. `bash tests/run.sh` also runs these four checks. |
+| Build, install, sign, and test replacement safeguards and host-file preservation. | `bash tests/install.sh` passed: `install passed: 20  failed: 0`. It installed and launched the signed app in a temporary home, dismissed the information dialog with System Events, and tested replacement and refusal cases. It did not change the user's installed app or SSH configuration. |
+| Build the app and verify its bundle and signature. | `bash scripts/build.sh` passed. The bundle and both embedded helpers existed and were executable, and `codesign --verify --deep --strict 'build/SSH File Drop.app'` passed. `osacompile` accepted the translated AppleScript during the build. |
 
-## 静的に確認した項目
+## Static checks
 
-以下は `src/droplet.applescript`、`src/ssh-file-drop-send`、`src/ssh-file-drop-host-candidates` とビルド・インストール用スクリプトを読み、コード上の動きを確認しました。実際のファイルドロップでは試していません。
+The following behavior was checked in `src/droplet.applescript`, `src/ssh-file-drop-send`, and `src/ssh-file-drop-host-candidates`. These checks did not exercise a real file drop.
 
-| `docs/brief.md` §7 の受け入れ項目 | 静的確認 |
+| Behavior | Code observation |
 | --- | --- |
-| 前回成功した Host が初期選択され、別 Host に変更できる。 | AppleScript は `last_host` を読み、現在のリストにあれば初期値に使います。Host 選択画面から別の Host も選べます。ヘルパーは成功した Host を保存します。 |
-| ディレクトリ、シンボリックリンク、複数入力を理由付きで拒否する。 | ヘルパーにはディレクトリとリンクの拒否メッセージがあり、AppleScript は入力が1つでない場合に警告します。ヘルパーの拒否応答は上のテストで実行済みです。 |
-| 失敗・キャンセル時にクリップボードを変更せず、成功時だけパスをコピーする。 | AppleScript は `OK` を受け取った場合だけクリップボード設定処理を呼びます。失敗・キャンセル時はアラートを表示します。実際のクリップボード内容は確認していません。 |
-| GUI 起動時に SSH エージェントが使えない場合、固まらず案内する。 | SSH 呼び出しはバッチモードと接続・通信確認の制限時間を設定します。`CONNECT` の案内には Terminal での接続確認と GUI からのエージェント利用に関する説明があります。この条件で GUI を実行してはいません。 |
-| クリップボード更新失敗と後始末失敗を、転送状態と区別して報告する。 | AppleScript はコピー失敗時に成功パスと再コピー操作を表示し、後始末状態が `failed` または `unknown` の場合は別の注意を追加します。ヘルパーの後始末失敗は実行確認済みですが、GUI メッセージは誘発していません。 |
+| Select the last successful host by default and allow choosing another host. | The droplet reads `last_host` and uses it as the default when it is in the host list. The host picker allows another selection, and the helper saves the host after a successful transfer. |
+| Handle multi-file drops and reject folders before transfer. | The droplet validates each item before host selection or transfer. It sends files in drop order. If any validation fails, it rejects the whole drop. If a transfer fails or is cancelled, it stops at that file. Paths for earlier completed transfers are copied one per line; if the first transfer fails, the clipboard is left unchanged. |
+| Set the clipboard after successful transfers and report copy failures separately. | The droplet copies the returned path list after full success. On a later-file failure, it copies paths for already sent files. It offers a retry if clipboard copying fails after a successful transfer. Actual clipboard contents were not checked. |
+| Give guidance when the GUI app cannot use the SSH agent. | SSH uses batch mode and connection-liveness limits. The `CONNECT` message suggests checking the connection and host key from Terminal and mentions GUI access to the SSH agent. This GUI condition was not exercised. |
+| Distinguish transfer failures from remote cleanup failures. | The droplet displays separate cleanup notes for `failed` and `unknown`. The helper's cleanup-failure response was exercised by the connection-cut test, but the GUI message was not triggered. |
 
-## 未検証
+## Not verified
 
-| `docs/brief.md` §7 の受け入れ項目または関連する対応範囲 | 未検証の内容 |
+| Area | What was not tested |
 | --- | --- |
-| Finder／Dock へのドロップから Host 選択、転送、パスのコピーまで。 | Finder／Dock から実ファイルをドロップして転送していません。インストールテストではアプリを起動し、ダブルクリック時の説明ダイアログを閉じただけです。 |
-| 前回 Host の初期選択と、GUI の選択画面での Host 切り替え。 | コードは静的に確認しましたが、ドロップレットのセッションでは試していません。 |
-| 通常・空・大きなファイル、特殊な名前、同名ファイル、拒否対象を Finder／Dock 経由で処理すること。 | ヘルパーを直接実行してテストしました。ドロップレット全体の操作は未テストです。 |
-| Terminal では成功する一方、GUI から SSH エージェントを利用できない状況。 | このエージェント差を作った GUI テストはしていません。 |
-| ホスト鍵・認証・接続エラー、転送キャンセル、クリップボード内容、コピー失敗、後始末警告を GUI が表示すること。 | ヘルパーの失敗応答は実行確認しましたが、GUI の表示と実際のクリップボード状態は確認していません。 |
-| テスト対象以外のリモート OS。 | SSH 接続先として確認したのは Darwin 25.5.0 のみです。Linux などはテストしていません。 |
-| 対応する最小 macOS バージョン。 | macOS 26.5 でビルド、署名、インストール、起動を確認しました。より古いバージョンの互換性は確認していません。 |
+| Finder or Dock drop flow. | No file was dropped through Finder or the Dock. The install test only launched the app and dismissed its information dialog. |
+| Host picker and multi-file UI. | Host selection, last-host default, progress UI, multi-file sequencing, and early rejection of a mixed drop were checked in code or through droplet contract checks, not through a GUI session. |
+| GUI cancellation and errors. | The app's Stop button, GUI display of connection and transfer errors, clipboard-copy failure, and cleanup warnings were not exercised. |
+| Real clipboard contents. | The tests did not inspect `pbpaste` or otherwise verify the clipboard. |
+| GUI SSH-agent access. | No GUI test was run with an agent that worked in Terminal but was unavailable to the app. |
+| Other remote operating systems. | Only Darwin 25.5.0 was tested. Linux and other systems were not tested. |
+| Minimum supported macOS version. | Build, signature, install, and launch were checked on macOS 26.5. Compatibility with older releases was not checked. |

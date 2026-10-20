@@ -179,7 +179,7 @@ on_signal() {
     wait "$CHILD_PID" 2>/dev/null
     CHILD_PID=
   fi
-  fail CANCELLED 130 "キャンセルしました"
+  fail CANCELLED 130 "Transfer cancelled"
 }
 
 # ---- VALIDATE ----
@@ -190,38 +190,38 @@ validate_file() {
     *) FILE="$PWD/$FILE" ;;
   esac
   case $FILE in
-    *[[:cntrl:]]*) fail INPUT 2 "ファイル名に改行や制御文字が含まれているため、転送しません" ;;
+    *[[:cntrl:]]*) fail INPUT 2 "File name contains a newline or control character" ;;
   esac
-  [ -L "$FILE" ] && fail INPUT 2 "シンボリックリンクは転送しません"
-  [ -e "$FILE" ] || fail INPUT 2 "ファイルが見つかりません"
-  [ -d "$FILE" ] && fail INPUT 2 "ディレクトリは転送しません"
-  [ -f "$FILE" ] || fail INPUT 2 "通常のファイルではないため、転送しません"
-  [ -r "$FILE" ] || fail INPUT 2 "ファイルを読み取れません"
+  [ -L "$FILE" ] && fail INPUT 2 "Symbolic links cannot be sent"
+  [ -e "$FILE" ] || fail INPUT 2 "File not found"
+  [ -d "$FILE" ] && fail INPUT 2 "Folders cannot be sent"
+  [ -f "$FILE" ] || fail INPUT 2 "Only regular files can be sent"
+  [ -r "$FILE" ] || fail INPUT 2 "File is not readable"
 
   BASE=${FILE##*/}
-  [ "${#BASE}" -le 255 ] || fail INPUT 2 "ファイル名が 255 バイトを超えています"
-  [ "$BASE" != "$PARTIAL_NAME" ] || fail INPUT 2 "このファイル名は予約されています"
+  [ "${#BASE}" -le 255 ] || fail INPUT 2 "File name is longer than 255 bytes"
+  [ "$BASE" != "$PARTIAL_NAME" ] || fail INPUT 2 "This file name is reserved"
 
-  SIG_BEFORE=$(stat -f '%z %Fm %i' -- "$FILE") || fail INPUT 2 "ファイルの状態を取得できません"
+  SIG_BEFORE=$(stat -f '%z %Fm %i' -- "$FILE") || fail INPUT 2 "Could not read file metadata"
   SIZE=${SIG_BEFORE%% *}
 }
 
 if [ "${1:-}" = "--check-file" ]; then
-  [ $# -eq 2 ] || fail INPUT 2 "使い方: ssh-file-drop-send --check-file FILE"
+  [ $# -eq 2 ] || fail INPUT 2 "Usage: ssh-file-drop-send --check-file FILE"
   FILE=$2
   validate_file
   printf 'OK\t%s\n' "$BASE"
   exit 0
 fi
 
-[ $# -eq 2 ] || fail INPUT 2 "使い方: ssh-file-drop-send HOST FILE"
+[ $# -eq 2 ] || fail INPUT 2 "Usage: ssh-file-drop-send HOST FILE"
 HOST=$1
 FILE=$2
 
-valid_host "$HOST" || fail INPUT 2 "Host 名に使えない文字が含まれています"
+valid_host "$HOST" || fail INPUT 2 "Host name contains an unsupported character"
 validate_file
 
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ssh-file-drop.XXXXXX") || fail INPUT 2 "作業用ディレクトリを作れません"
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ssh-file-drop.XXXXXX") || fail INPUT 2 "Could not create a temporary working directory"
 trap on_signal TERM INT HUP
 trap cleanup_local EXIT
 
@@ -232,32 +232,32 @@ script='umask 077 && d=$(mktemp -d /tmp/ssh-file-drop.XXXXXXXX) && chmod 700 "$d
 run_remote "$script"
 rc=$?
 if [ "$rc" -eq 255 ]; then
-  fail CONNECT 3 "接続できませんでした。$(tail_of "$WORK_DIR/err")"
+  fail CONNECT 3 "Could not connect. $(tail_of "$WORK_DIR/err")"
 elif [ "$rc" -ne 0 ]; then
-  fail REMOTE_SETUP 4 "転送先に作業ディレクトリを作れませんでした。$(tail_of "$WORK_DIR/err")"
+  fail REMOTE_SETUP 4 "Could not create a working directory on the host. $(tail_of "$WORK_DIR/err")"
 fi
 REPORTED=$(cat "$WORK_DIR/out")
-[[ $REPORTED =~ $DIR_RE ]] || fail REMOTE_SETUP 4 "転送先が想定外の出力を返しました"
+[[ $REPORTED =~ $DIR_RE ]] || fail REMOTE_SETUP 4 "The host returned unexpected output"
 OWNED_DIR=$REPORTED
 
 # ---- UPLOAD ----
 
 PHASE=UPLOAD
 if ! run_child "$SCP" "${COMMON_OPTS[@]}" -q -- "$FILE" "$HOST:$OWNED_DIR/$PARTIAL_NAME"; then
-  fail UPLOAD 5 "アップロードに失敗しました。$(tail_of "$WORK_DIR/err")"
+  fail UPLOAD 5 "Upload failed. $(tail_of "$WORK_DIR/err")"
 fi
 
 # ---- VERIFY ----
 
 PHASE=VERIFY
-SIG_AFTER=$(stat -f '%z %Fm %i' -- "$FILE") || fail VERIFY 6 "転送後にファイルの状態を取得できません"
-[ "$SIG_AFTER" = "$SIG_BEFORE" ] || fail VERIFY 6 "転送中に元のファイルが変更されたため、中止しました"
+SIG_AFTER=$(stat -f '%z %Fm %i' -- "$FILE") || fail VERIFY 6 "Could not read file metadata after transfer"
+[ "$SIG_AFTER" = "$SIG_BEFORE" ] || fail VERIFY 6 "The source file changed during transfer"
 
 if ! run_remote 'cd -- "$1" && wc -c < "$2"' "$OWNED_DIR" "$PARTIAL_NAME"; then
-  fail VERIFY 6 "転送先のサイズを確認できませんでした。$(tail_of "$WORK_DIR/err")"
+  fail VERIFY 6 "Could not check the remote file size. $(tail_of "$WORK_DIR/err")"
 fi
 REMOTE_SIZE=$(tr -d '[:space:]' <"$WORK_DIR/out")
-[ "$REMOTE_SIZE" = "$SIZE" ] || fail VERIFY 6 "転送先のサイズが一致しません (元 $SIZE バイト、転送先 ${REMOTE_SIZE:-不明})"
+[ "$REMOTE_SIZE" = "$SIZE" ] || fail VERIFY 6 "Remote file size does not match (source: $SIZE bytes, remote: ${REMOTE_SIZE:-unknown})"
 
 # ---- FINALIZE ----
 
@@ -268,7 +268,7 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   # A remote command failure (not a dropped connection) means the rename did not complete.
   [ "$rc" -ne 255 ] && PHASE=VERIFY
-  fail FINALIZE 7 "ファイルの確定に失敗しました。$(tail_of "$WORK_DIR/err")"
+  fail FINALIZE 7 "Could not finalize the file. $(tail_of "$WORK_DIR/err")"
 fi
 
 PHASE=DONE
