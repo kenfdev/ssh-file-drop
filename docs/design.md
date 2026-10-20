@@ -8,8 +8,8 @@
 | --- | --- |
 | `src/ssh-file-drop-send` | 転送ヘルパー（bash 3.2 互換）。UI を持たない。 |
 | `src/droplet.applescript` | ドロップレット。Host 選択、進捗、キャンセル、結果表示、クリップボード。 |
-| `scripts/build.sh` | `osacompile` で `.app` を作り、ヘルパーを `Contents/Resources` に入れ、ad-hoc 署名する。 |
-| `tests/` | ヘルパーの自動テスト。 |
+| `scripts/build.sh` | `osacompile` で `.app` を作り、転送ヘルパーと Host 候補抽出ヘルパーを `Contents/Resources` に入れ、ad-hoc 署名する。 |
+| `tests/` | ヘルパーと Host 候補抽出の自動テスト。 |
 
 ## ヘルパーの契約
 
@@ -67,7 +67,9 @@ ERR の CATEGORY: `INPUT`, `CONNECT`, `REMOTE_SETUP`, `UPLOAD`, `VERIFY`, `FINAL
 
 - `on open`: 入力が一つだけの通常ファイルかを確認する。複数・ディレクトリ・リンクは理由を表示して終了。
 - Host 一覧は `~/.config/ssh-file-drop/hosts`（1 行 1 エイリアス、`#` コメント可）。前回成功した Host は `~/.config/ssh-file-drop/last_host`。
-- `choose from list` のプロンプトにファイル名を出し、ボタンを「転送」「キャンセル」にする。一覧の末尾に「Host を追加…」を置く。追加された Host はヘルパー側の検証と同じ規則で確認する。
+- 「Host を追加…」では `src/ssh-file-drop-host-candidates` が `~/.ssh/config` から候補を抽出する。Include は `~/.ssh` 基準で glob 展開し、最大深度 8 まで再帰する。同じファイルの再読込を避け、Match ブロックを無視する。`*`、`?`、先頭 `!` を含む名前と、転送ヘルパーの Host 検証に通らない名前は除く。抽出は単純な空白区切りの Include パスと glob に対応し、空白を含む引用パス、Match 条件の評価、Host パターンの実接続先への展開はしない。
+- 候補から選ぶか手入力でき、選んだ Host だけを既存の検証に通して `hosts` へ追記する。`hosts` は引き続き明示的な選択リストで、自動同期しない。SSH 設定には wildcard や実接続先ではない Host 宣言もあるため、利用者が追加を選ぶ形にする。
+- `choose from list` のプロンプトにファイル名を出し、ボタンを「転送」「キャンセル」にする。一覧の末尾に「Host を追加…」を置く。
 - ヘルパーをバックグラウンドで起動し、stdout を一時ファイルへ出す。`progress total steps` と `progress description` でスピナーを出し、`kill -0` で終了を待つ。Stop は AppleScript のエラー -128 になるので、ヘルパーへ TERM を送り、終了を待ってからキャンセルを表示する。
 - 成功後にだけクリップボードへ設定する。設定に失敗したら、パスを表示して「コピー」を再試行できるようにする。転送は再実行しない。
 - 失敗の表示は CATEGORY ごとに文言を分ける。`CONNECT` では「Terminal で `ssh HOST` を実行して接続とホスト鍵を確認してください」と案内する。
@@ -79,5 +81,5 @@ ERR の CATEGORY: `INPUT`, `CONNECT`, `REMOTE_SETUP`, `UPLOAD`, `VERIFY`, `FINAL
 | --- | --- |
 | `ssh host 'cat > path'` で転送 | `scp` で足りる。依頼書は `scp` を指定している。 |
 | ユーザー由来のファイル名を `scp` のリモートパスに使う | `scp` の版（SFTP／旧方式）でパス解釈が違う。固定名でアップロードして `mv` で改名する。 |
-| `~/.ssh/config` の `Host` 行を自動で拾う | `Include`、`Match`、ワイルドカードを扱えない。明示登録にする。 |
+| `~/.ssh/config` を常に選択リストとして使う | `Host` パターンや条件付き設定が混在する。候補は追加操作の中で提示し、実際の選択リストは `hosts` に明示登録された別名に保つ。 |
 | Python や Node のヘルパー | 外部ランタイムを避ける。bash と AppleScript だけで足りる。 |

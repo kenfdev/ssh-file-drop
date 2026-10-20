@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated tests for src/ssh-file-drop-send. See tests/README.md.
+# Automated tests for the transfer helper and SSH-config host candidates.
 #
 # Env:
 #   SFD_HOSTNAME  sshd to test against        (default localhost)
@@ -18,6 +18,11 @@ SFD_PORT=${SFD_PORT:-22}
 SFD_USER=${SFD_USER:-$USER}
 SFD_IDENTITY=${SFD_IDENTITY:-}
 SFD_BIG_MB=${SFD_BIG_MB:-200}
+
+if ! bash "$HERE/host-candidates.sh"; then
+  echo "host candidate tests failed" >&2
+  exit 1
+fi
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/sfd-test.XXXXXX")
 CREATED=$T/created-dirs
