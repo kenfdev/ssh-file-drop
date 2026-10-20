@@ -44,7 +44,7 @@ An app launched from Terminal may have different environment variables and SSH-a
 
 ## Usage
 
-Drop one or more regular files from Finder onto the `SSH File Drop` icon in the Dock or Finder. Folders and other non-regular items are rejected before any file is sent. Choose a host and select “Transfer”. Files are sent in drop order. On success, the clipboard contains one remote path per line, for example `/tmp/ssh-file-drop.a1B2c3D4/report.pdf`. The app does not paste or run commands for you.
+Drop one or more regular files from Finder onto the `SSH File Drop` icon in the Dock or Finder. Folders and other non-regular items are rejected before any file is sent. Choose a host and select “Transfer”. Files are sent in drop order. On success, the clipboard contains one remote path per line, for example `/tmp/ssh-file-drop.a1B2c3D4/report.pdf`. Result dialogs show up to 10 paths, followed by `... N more` when needed. The clipboard still contains every path. The app does not paste or run commands for you.
 
 If a transfer fails or is cancelled, the app stops at that file. Paths for files already sent are copied to the clipboard, one per line. If the first file fails, the clipboard is left unchanged.
 

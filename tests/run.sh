@@ -27,6 +27,10 @@ if ! bash "$HERE/droplet-contract.sh"; then
   echo "droplet contract tests failed" >&2
   exit 1
 fi
+if ! bash "$HERE/display-cap.sh"; then
+  echo "display cap tests failed" >&2
+  exit 1
+fi
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/sfd-test.XXXXXX")
 CREATED=$T/created-dirs
