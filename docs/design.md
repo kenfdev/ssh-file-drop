@@ -1,91 +1,91 @@
-# 設計メモ
+# Design Notes
 
-要件の正本は `docs/brief.md`（依頼書のコピー）。この文書は実装上の決定を記録する。
+The acceptance criteria are maintained in [`docs/acceptance-criteria.md`](acceptance-criteria.md). This document records implementation decisions.
 
-## 構成
+## Components
 
-| ファイル | 役割 |
+| File | Responsibility |
 | --- | --- |
-| `src/ssh-file-drop-send` | 転送ヘルパー（bash 3.2 互換）。UI を持たない。 |
-| `src/droplet.applescript` | ドロップレット。Host 選択、進捗、キャンセル、結果表示、クリップボード。 |
-| `scripts/build.sh` | `osacompile` で `.app` を作り、ヘルパーと `assets/AppIcon.icns` を組み込み、ad-hoc 署名する。既定アイコンが優先されるため、生成された `Assets.car` は除く。 |
-| `scripts/make-icon.sh` | `assets/icon-1024.png` から標準サイズの `.iconset` を作り、`sips` と `iconutil` で `assets/AppIcon.icns` を再生成する。通常のビルドでは再生成しない。 |
-| `scripts/install.sh` | ビルド後、インストール先のアプリを終了して待ち、`~/Applications/SSH File Drop.app` を置き換える。`SSH_FILE_DROP_INSTALL_DIR` でテスト用の保存先を指定できる。終了しない場合は 30 秒後に中止し、既存アプリを残す。待ち時間は `SSH_FILE_DROP_QUIT_TIMEOUT_SECONDS`（1〜300 秒）で変更できる。Dock と利用者の設定は変更しない。 |
-| `tests/` | ヘルパーと Host 候補抽出の自動テスト。 |
+| `src/ssh-file-drop-send` | Transfer helper, compatible with Bash 3.2. It has no UI. |
+| `src/droplet.applescript` | Droplet UI for host selection, progress, cancellation, results, and clipboard updates. |
+| `scripts/build.sh` | Uses `osacompile` to build the app, adds the helper and `assets/AppIcon.icns`, and applies an ad-hoc signature. Removes the generated `Assets.car` because it takes precedence over the custom icon. |
+| `scripts/make-icon.sh` | Creates a standard `.iconset` from `assets/icon-1024.png` and regenerates `assets/AppIcon.icns` with `sips` and `iconutil`. Normal builds do not regenerate the icon. |
+| `scripts/install.sh` | Builds the app, waits for the installed app to quit, and replaces `~/Applications/SSH File Drop.app`. `SSH_FILE_DROP_INSTALL_DIR` selects a test destination. If the app does not quit within 30 seconds, installation stops and preserves the existing app. Set `SSH_FILE_DROP_QUIT_TIMEOUT_SECONDS` to change the wait from 1 to 300 seconds. The installer does not change the Dock or user settings. |
+| `tests/` | Automated tests for the helper, SSH host-candidate extraction, and droplet contract. |
 
-## ヘルパーの契約
+## Helper contract
 
-呼び出し: `ssh-file-drop-send HOST FILE`
+Invocation: `ssh-file-drop-send HOST FILE`
 
-stdout は次の形式のみ。区切りはタブ。
+Standard output uses tab separators and only these forms:
 
-- 成功: `OK<TAB>/tmp/ssh-file-drop.xxxxxxxx/name`
-- 失敗: `ERR<TAB>CATEGORY<TAB>message`
-- 後始末の状態（失敗時のみ、ERR の次の行）: `CLEANUP<TAB>none|done|failed|unknown`
+- Success: `OK<TAB>/tmp/ssh-file-drop.xxxxxxxx/name`
+- Failure: `ERR<TAB>CATEGORY<TAB>message`
+- Cleanup state on failure, on the line after ERR: `CLEANUP<TAB>none|done|failed|unknown`
 
-stderr は診断用。ファイル内容と秘密は出さない。
+Standard error is for diagnostics. Do not print file contents or secrets.
 
-終了コード: 0 成功、2 入力拒否、3 接続・認証・ホスト鍵、4 リモート準備、5 アップロード、6 検証、7 確定、130 キャンセル。
+Exit codes: 0 success, 2 rejected input, 3 connection/authentication/host key, 4 remote setup, 5 upload, 6 verification, 7 finalization, and 130 cancellation.
 
-ERR の CATEGORY: `INPUT`, `CONNECT`, `REMOTE_SETUP`, `UPLOAD`, `VERIFY`, `FINALIZE`, `CANCELLED`。
+ERR categories are `INPUT`, `CONNECT`, `REMOTE_SETUP`, `UPLOAD`, `VERIFY`, `FINALIZE`, and `CANCELLED`.
 
-### 状態機械
+### State machine
 
-フェーズは `VALIDATE → MKDIR → UPLOAD → VERIFY → FINALIZE → DONE` の一方向。
+Phases move only forward: `VALIDATE → MKDIR → UPLOAD → VERIFY → FINALIZE → DONE`.
 
-- 変数 `OWNED_DIR` は、`mktemp -d` の出力が `^/tmp/ssh-file-drop\.[A-Za-z0-9]+$` に一致した後にだけ設定する。
-- 後始末は `OWNED_DIR` が設定済みで、フェーズが FINALIZE 完了前のときだけ実行する。
-- 後始末は `rm -f DIR/.ssh-file-drop.partial` と `rmdir DIR` だけ。`rm -rf` と、ワイルドカードは使わない。
-- 確定（rename）の成否が不明な失敗では、削除しない。`CLEANUP unknown` を返す。
+- Set `OWNED_DIR` only after `mktemp -d` returns a path matching `^/tmp/ssh-file-drop\.[A-Za-z0-9]+$`.
+- Cleanup runs only when `OWNED_DIR` is set and finalization is not complete.
+- Cleanup runs only `rm -f DIR/.ssh-file-drop.partial` and `rmdir DIR`. Never use `rm -rf` or wildcards.
+- If the result of the final rename is unknown, do not delete anything and return `CLEANUP unknown`.
 
-### 入力検証（境界）
+### Input validation
 
-- FILE は通常ファイルの一つだけ。ディレクトリ、シンボリックリンク（最後の要素）、存在しないパスは `INPUT` で拒否。
-- ベース名に改行・制御文字（0x00-0x1f, 0x7f）を含む場合、255 バイト超の場合、予約名 `.ssh-file-drop.partial` の場合は拒否。
-- HOST は `^[A-Za-z0-9_][A-Za-z0-9._@:%+-]*$` に一致するものだけ。先頭 `-`、空白、制御文字は拒否。ssh へは `--` の後ろに渡す。
+- A single regular file is accepted by the helper. Directories, final-component symbolic links, and missing paths are rejected with `INPUT`.
+- Reject basenames containing newlines or control characters (0x00-0x1f, 0x7f), basenames longer than 255 bytes, and the reserved name `.ssh-file-drop.partial`.
+- HOST must match `^[A-Za-z0-9_][A-Za-z0-9._@:%+-]*$`. Reject leading `-`, spaces, and control characters. Pass the host to ssh after `--`.
 
-### SSH 呼び出し
+### SSH calls
 
-- 実行ファイルは `/usr/bin/ssh` と `/usr/bin/scp`。PATH に依存しない。
-- 共通オプション: `BatchMode=yes`, `StrictHostKeyChecking=yes`, `ConnectTimeout=10`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, `ClearAllForwardings=yes`, ssh には `-T`。
-- 環境変数 `SSH_FILE_DROP_SSH_CONFIG` があれば `-F` で渡す（テスト用。通常は未設定）。
-- リモートコマンドは固定のシェルスクリプトを `sh -c '<script>' sh <args...>` で渡す。全ての引数とスクリプトを同一のシングルクォート関数で引用する。ファイル名を文字列連結でコマンドに埋め込まない。
-- アップロードは `scp` で、リモート側のパスは生成した固定名（`DIR/.ssh-file-drop.partial`）だけ。ユーザー由来の名前はリモートの scp パス解釈に触れない。ローカル側は絶対パスで渡し、`host:` 形式と誤認されないようにする。
+- Executables are `/usr/bin/ssh` and `/usr/bin/scp`; do not rely on PATH.
+- Common options are `BatchMode=yes`, `StrictHostKeyChecking=yes`, `ConnectTimeout=10`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, `ClearAllForwardings=yes`, and `ControlMaster=no`. ssh also uses `-T`.
+- If `SSH_FILE_DROP_SSH_CONFIG` is set, pass it with `-F` for tests. It is normally unset.
+- Pass remote commands as a fixed shell script with `sh -c '<script>' sh <args...>`. Quote the script and every argument with the same single-quote function. Never concatenate a file name into a command string.
+- Use `scp` with only a generated fixed remote path (`DIR/.ssh-file-drop.partial`). User-provided names never reach scp's remote-path parsing. Pass the local path as an absolute path to avoid interpreting it as `host:`.
 
-### 手順
+### Transfer steps
 
-1. `mktemp -d /tmp/ssh-file-drop.XXXXXXXX`（`umask 077`）。出力を検証して `OWNED_DIR` に設定。
-2. `scp` で `.ssh-file-drop.partial` へ。開始前にローカルの size と mtime を記録。
-3. 検証: ローカルの size/mtime が変わっていないこと、リモートの `wc -c` が一致すること。
-4. 確定: `chmod 600 partial && mv -- partial 'name'`、`test -f` で存在確認。ディレクトリは 0700 のまま。
-5. `OK` を出力。
+1. Create a remote directory with `umask 077` and `mktemp -d /tmp/ssh-file-drop.XXXXXXXX`. Validate the output and set `OWNED_DIR`.
+2. Upload to `.ssh-file-drop.partial` with `scp`. Record local size and modification time before starting.
+3. Verify that the local size and modification time did not change and that remote `wc -c` matches the local size.
+4. Finalize with `chmod 600 partial && mv -- partial 'name'`, then confirm the file exists. The directory remains mode `0700`.
+5. Print `OK`.
 
-### キャンセル
+### Cancellation
 
-- TERM と INT を trap する。子プロセスはバックグラウンドで起動して `wait` し、trap が即時に動くようにする。
-- 子プロセスを止め、必要なら後始末をして `ERR CANCELLED` と `CLEANUP` 行を出し、130 で終了する。
+- Trap TERM and INT. Run child processes in the background and wait for them so traps can run promptly.
+- Stop the child, clean up when safe, print `ERR CANCELLED` and a `CLEANUP` line, then exit with status 130.
 
-## Droplet
+## Droplet behavior
 
-- `on open` accepts one or more dropped items. It checks every item with `--check-file` before sending any file. If any item is not a regular file, the whole drop is rejected and the alert identifies the item and reason.
-- The user chooses one host for the entire drop. Files are sent sequentially in drop order through the unchanged single-file helper. Progress names the current file and its position.
-- Each helper call creates its own fresh remote directory, so equal basenames never overwrite one another.
-- On full success, the clipboard contains every returned remote path in drop order, separated by line breaks with no trailing line break. A one-file drop still copies one path with no trailing line break.
-- On failure or cancellation, sending stops at the current file. The helper's existing cleanup handles that file's partial remote upload. Previously completed paths are copied to the clipboard, one per line; when the first file fails, the clipboard is left unchanged. The alert identifies the failed file and reason, states the number of copied paths, and retains the helper's transfer-category and cleanup-failure details.
-- Host 一覧は `~/.config/ssh-file-drop/hosts`（1 行 1 エイリアス、`#` コメント可）。前回成功した Host は `~/.config/ssh-file-drop/last_host`。
-- 「Host を追加…」では `src/ssh-file-drop-host-candidates` が `~/.ssh/config` から候補を抽出する。Include は `~/.ssh` 基準で glob 展開し、最大深度 8 まで再帰する。同じファイルの再読込を避け、Match ブロックを無視する。`*`、`?`、先頭 `!` を含む名前と、転送ヘルパーの Host 検証に通らない名前は除く。抽出は単純な空白区切りの Include パスと glob に対応し、空白を含む引用パス、Match 条件の評価、Host パターンの実接続先への展開はしない。
-- 候補から選ぶか手入力でき、選んだ Host だけを既存の検証に通して `hosts` へ追記する。`hosts` は引き続き明示的な選択リストで、自動同期しない。SSH 設定には wildcard や実接続先ではない Host 宣言もあるため、利用者が追加を選ぶ形にする。
-- `choose from list` のプロンプトにファイル名を出し、ボタンを「転送」「キャンセル」にする。一覧の末尾に「Host を追加…」を置く。
-- ヘルパーをバックグラウンドで起動し、stdout を一時ファイルへ出す。`progress total steps` と `progress description` でスピナーを出し、`kill -0` で終了を待つ。Stop は AppleScript のエラー -128 になるので、ヘルパーへ TERM を送り、終了を待ってからキャンセルを表示する。
-- 成功後にだけクリップボードへ設定する。設定に失敗したら、パスを表示して「コピー」を再試行できるようにする。転送は再実行しない。
-- 失敗の表示は CATEGORY ごとに文言を分ける。`CONNECT` では「Terminal で `ssh HOST` を実行して接続とホスト鍵を確認してください」と案内する。
-- `CLEANUP` が `failed` または `unknown` のときは、「リモートに未完成のディレクトリが残っている可能性があります」と表示する。
+- `on open` accepts one or more dropped items. It checks every item with `--check-file` before sending any file. If any item is not a regular file, the entire drop is rejected and an alert identifies the item and reason.
+- The user chooses one host for the whole drop. Files are sent sequentially in drop order through the unchanged single-file helper. Progress names the current file and its position.
+- Each helper call creates a fresh remote directory, so equal basenames never overwrite one another.
+- On full success, the clipboard contains all returned remote paths in drop order, separated by line breaks with no trailing line break. A one-file drop copies one path with no trailing line break.
+- On failure or cancellation, sending stops at the current file. The helper's existing cleanup handles that file's partial upload. Previously completed paths are copied to the clipboard, one per line. If the first file fails, the clipboard is left unchanged. The alert identifies the failed file and reason, states the number of copied paths, and retains the helper's transfer-category and cleanup-failure details.
+- The host list is `~/.config/ssh-file-drop/hosts` (one alias per line; `#` comments are allowed). The last successful host is stored in `~/.config/ssh-file-drop/last_host`.
+- “+ Add Host...” runs `src/ssh-file-drop-host-candidates` to extract candidates from `~/.ssh/config`. Includes are glob-expanded relative to `~/.ssh`, to a maximum recursion depth of 8. Repeated files are skipped and Match blocks are ignored. Names containing `*`, `?`, or a leading `!`, and names rejected by the transfer helper's host validator, are excluded. Extraction supports simple whitespace-separated Include paths and globs. It does not support quoted paths with spaces, evaluate Match conditions, or expand Host patterns to their actual connection targets.
+- The user can choose a candidate or enter a host manually. Only the selected host is validated and appended to `hosts`. The list remains an explicit selection list and is not synchronized automatically because SSH configuration can include wildcards or Host declarations that are not connection targets.
+- The host picker shows the dropped file names, uses “Transfer” and “Cancel” buttons, and places “+ Add Host...” at the end of the list.
+- The helper runs in the background and writes stdout to a temporary file. The app shows a spinner with `progress total steps` and `progress description`, and waits for exit with `kill -0`. Stop raises AppleScript error -128, so the app sends TERM to the helper and waits for it to finish before showing cancellation.
+- The app updates the clipboard only after success. If copying fails, it shows the path and offers a retry without repeating the transfer.
+- Failure messages differ by CATEGORY. For `CONNECT`, the app asks the user to run `ssh HOST` in Terminal to check the connection and host key.
+- If `CLEANUP` is `failed` or `unknown`, the app warns that an incomplete directory may remain on the host.
 
-## 採用しなかった案
+## Rejected alternatives
 
-| 案 | 採らない理由 |
+| Alternative | Reason |
 | --- | --- |
-| `ssh host 'cat > path'` で転送 | `scp` で足りる。依頼書は `scp` を指定している。 |
-| ユーザー由来のファイル名を `scp` のリモートパスに使う | `scp` の版（SFTP／旧方式）でパス解釈が違う。固定名でアップロードして `mv` で改名する。 |
-| `~/.ssh/config` を常に選択リストとして使う | `Host` パターンや条件付き設定が混在する。候補は追加操作の中で提示し、実際の選択リストは `hosts` に明示登録された別名に保つ。 |
-| Python や Node のヘルパー | 外部ランタイムを避ける。bash と AppleScript だけで足りる。 |
+| Transfer with `ssh host 'cat > path'` | `scp` is sufficient and was specified for this app. |
+| Use a user-provided filename as the remote scp path | scp path parsing differs between SFTP and legacy modes. Upload to a fixed name and rename it with `mv`. |
+| Use `~/.ssh/config` as the permanent host list | Host patterns and conditional settings can be present. Candidates are offered during add-host; the actual selection list contains only explicitly registered aliases. |
+| Use a Python or Node helper | Avoid an external runtime; Bash and AppleScript are sufficient. |
