@@ -3,6 +3,9 @@
 
 property appTitle : "SSH File Drop"
 property addHostItem : "+ Add Host..."
+property activeHost : ""
+property activeSocket : ""
+property activeControlDir : ""
 
 on run
 	activate
@@ -13,12 +16,18 @@ on open theItems
 	try
 		my handleDrop(theItems)
 	on error errMsg number errNum
+		if activeSocket is not "" then my closeMaster(activeHost, activeSocket, activeControlDir)
 		if errNum is not -128 then
 			activate
 			display alert appTitle message "An unexpected error occurred." & return & errMsg as critical
 		end if
 	end try
 end open
+
+on quit
+	if activeSocket is not "" then my closeMaster(activeHost, activeSocket, activeControlDir)
+	continue quit
+end quit
 
 on helperPath()
 	return POSIX path of (path to resource "ssh-file-drop-send")
@@ -60,19 +69,36 @@ on handleDrop(theItems)
 	set hostName to my chooseHost(fileNames)
 	if hostName is missing value then return
 
+	set controlDir to do shell script "d=$(/usr/bin/mktemp -d /tmp/sfd.XXXXXX) && /bin/chmod 700 \"$d\" && /usr/bin/printf %s \"$d\""
+	set controlSocket to controlDir & "/c"
+	try
+		my runHelperTolerant({"--open-master", hostName, controlSocket})
+		if my fileExists(controlSocket) is false then error "SSH master did not start. Check the host key, SSH agent, and authentication."
+		set activeHost to hostName
+		set activeSocket to controlSocket
+		set activeControlDir to controlDir
+	on error errMsg number errNum
+		do shell script "/bin/rm -f " & quoted form of controlSocket & "; /bin/rmdir " & quoted form of controlDir & " 2>/dev/null; true"
+		activate
+		display alert appTitle message "Could not connect. In Terminal, run ssh " & hostName & " to check the connection and host key." & return & return & "Details: " & errMsg as critical
+		return
+	end try
+
 	set sentPaths to {}
 	set totalFiles to count of filePaths
 	repeat with fileIndex from 1 to totalFiles
-		set transferResult to my transfer(hostName, item fileIndex of filePaths, item fileIndex of fileNames, fileIndex, totalFiles)
+		set transferResult to my transfer(hostName, item fileIndex of filePaths, item fileIndex of fileNames, fileIndex, totalFiles, controlSocket)
 		set parsed to transferParsed of transferResult
 		set wasCancelled to transferCancelled of transferResult
 		if (okValue of parsed) is not "" then
 			set end of sentPaths to okValue of parsed
 		else
+			my closeMaster(hostName, controlSocket, controlDir)
 			my reportFailure(parsed, hostName, item fileIndex of fileNames, wasCancelled, sentPaths)
 			return
 		end if
 	end repeat
+	my closeMaster(hostName, controlSocket, controlDir)
 	my finishSuccess(my joinLines(sentPaths), hostName)
 end handleDrop
 
@@ -107,7 +133,7 @@ on chooseHost(fileNames)
 		else if (count of hosts) > 0 then
 			set defaultItem to item 1 of hosts
 		end if
-		set promptText to "Files: " & my joinLines(fileNames) & return & "Choose a host for this drop."
+		set promptText to "Files: " & my limitedLines(my joinLines(fileNames)) & return & "Choose a host for this drop."
 		if (count of hosts) is 0 then set promptText to promptText & return & "No hosts are registered yet."
 		set picked to choose from list choices with title appTitle with prompt promptText default items {defaultItem} OK button name "Transfer" cancel button name "Cancel"
 		if picked is false then return missing value
@@ -150,14 +176,14 @@ on promptForHost()
 	return text returned of answer
 end promptForHost
 
-on transfer(hostName, filePath, fileName, fileIndex, totalFiles)
+on transfer(hostName, filePath, fileName, fileIndex, totalFiles, controlSocket)
 	set workDir to do shell script "/usr/bin/mktemp -d /tmp/ssh-file-drop-ui.XXXXXX"
 	set outFile to workDir & "/out"
 	set pidFile to workDir & "/pid"
 	set rcFile to workDir & "/rc"
 
-	set launcher to "/bin/sh -c " & quoted form of ("\"$1\" \"$2\" \"$3\" >\"$4\" 2>/dev/null </dev/null & echo $! >\"$5\"; wait $!; echo $? >\"$6\"")
-	set launcher to launcher & " sh " & quoted form of my helperPath() & " " & quoted form of hostName & " " & quoted form of filePath & " " & quoted form of outFile & " " & quoted form of pidFile & " " & quoted form of rcFile
+	set launcher to "/bin/sh -c " & quoted form of ("SSH_FILE_DROP_CONTROL_PATH=$7 \"$1\" \"$2\" \"$3\" >\"$4\" 2>/dev/null </dev/null & echo $! >\"$5\"; wait $!; echo $? >\"$6\"")
+	set launcher to launcher & " sh " & quoted form of my helperPath() & " " & quoted form of hostName & " " & quoted form of filePath & " " & quoted form of outFile & " " & quoted form of pidFile & " " & quoted form of rcFile & " " & quoted form of controlSocket
 	do shell script launcher & " >/dev/null 2>&1 &"
 
 	set cancelled to false
@@ -242,6 +268,7 @@ on reportFailure(parsed, hostName, fileName, cancelled, sentPaths)
 	set copiedCount to copiedCount of copyResult
 	set clipboardNote to copyNote of copyResult
 	set detail to errMessage of parsed
+	if (count of sentPaths) > 0 then set detail to detail & return & return & "Completed paths:" & return & my limitedLines(my joinLines(sentPaths))
 	if cat is "" then
 		set body to "The helper did not return a result."
 	else if cat is "CONNECT" then
@@ -282,6 +309,22 @@ on joinLines(theLines)
 	return joined
 end joinLines
 
+on closeMaster(hostName, controlSocket, controlDir)
+	my runHelperTolerant({"--close-master", hostName, controlSocket})
+	do shell script "/bin/rm -f " & quoted form of controlSocket & "; /bin/rmdir " & quoted form of controlDir & " 2>/dev/null; true"
+	set activeHost to ""
+	set activeSocket to ""
+	set activeControlDir to ""
+end closeMaster
+
+on limitedLines(allLines)
+	set entries to paragraphs of allLines
+	if (count of entries) <= 10 then return allLines
+	set shown to items 1 thru 10 of entries
+	set end of shown to "... " & ((count of entries) - 10) & " more"
+	return my joinLines(shown)
+end limitedLines
+
 on finishSuccess(remotePath, hostName)
 	set copied to false
 	repeat
@@ -292,8 +335,8 @@ on finishSuccess(remotePath, hostName)
 				exit repeat
 			end if
 		end try
-		set answer to display dialog "The transfer finished, but the path could not be copied to the clipboard." & return & return & remotePath with title appTitle buttons {"Close", "Copy Again"} default button 2 cancel button 1
+		set answer to display dialog "The transfer finished, but the path could not be copied to the clipboard." & return & return & my limitedLines(remotePath) with title appTitle buttons {"Close", "Copy Again"} default button 2 cancel button 1
 		-- Close raises a cancellation error and exits. Do not repeat the transfer.
 	end repeat
-	display dialog "Transfer complete. The path was copied to the clipboard." & return & return & remotePath & return & return & "Host: " & hostName with title appTitle buttons {"OK"} default button 1 giving up after 15
+	display dialog "Transfer complete. The path was copied to the clipboard." & return & return & my limitedLines(remotePath) & return & return & "Host: " & hostName with title appTitle buttons {"OK"} default button 1 giving up after 15
 end finishSuccess

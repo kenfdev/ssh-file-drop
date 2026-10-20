@@ -15,7 +15,7 @@ The acceptance criteria are maintained in [`docs/acceptance-criteria.md`](accept
 
 ## Helper contract
 
-Invocation: `ssh-file-drop-send HOST FILE`
+Normal invocation: `ssh-file-drop-send HOST FILE`. The droplet passes a temporary ControlPath with `SSH_FILE_DROP_CONTROL_PATH` so files in one drop share an SSH master connection. It opens and closes the master with `--open-master HOST SOCKET` and `--close-master HOST SOCKET`. Standalone helper calls use independent connections.
 
 Standard output uses tab separators and only these forms:
 
@@ -47,7 +47,7 @@ Phases move only forward: `VALIDATE → MKDIR → UPLOAD → VERIFY → FINALIZE
 ### SSH calls
 
 - Executables are `/usr/bin/ssh` and `/usr/bin/scp`; do not rely on PATH.
-- Common options are `BatchMode=yes`, `StrictHostKeyChecking=yes`, `ConnectTimeout=10`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, `ClearAllForwardings=yes`, and `ControlMaster=no`. ssh also uses `-T`.
+- Per-file SSH and scp calls use `BatchMode=yes`, `StrictHostKeyChecking=yes`, `ConnectTimeout=10`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, `ClearAllForwardings=yes`, and `ControlMaster=no`. SSH remote commands also use `-T`. The master uses `-M`, `BatchMode=yes`, and strict host-key checking; `-N` opens no forwarding or remote command.
 - If `SSH_FILE_DROP_SSH_CONFIG` is set, pass it with `-F` for tests. It is normally unset.
 - Pass remote commands as a fixed shell script with `sh -c '<script>' sh <args...>`. Quote the script and every argument with the same single-quote function. Never concatenate a file name into a command string.
 - Use `scp` with only a generated fixed remote path (`DIR/.ssh-file-drop.partial`). User-provided names never reach scp's remote-path parsing. Pass the local path as an absolute path to avoid interpreting it as `host:`.
@@ -68,14 +68,14 @@ Phases move only forward: `VALIDATE → MKDIR → UPLOAD → VERIFY → FINALIZE
 ## Droplet behavior
 
 - `on open` accepts one or more dropped items. It checks every item with `--check-file` before sending any file. If any item is not a regular file, the entire drop is rejected and an alert identifies the item and reason.
-- The user chooses one host for the whole drop. Files are sent sequentially in drop order through the unchanged single-file helper. Progress names the current file and its position.
+- The user chooses one host for the whole drop. A private 0700 temporary directory holds a short ControlPath. One SSH master is opened for the drop and closed after success, failure, cancellation, or app quit. A 60-second ControlPersist is a crash backstop. Files are sent sequentially in drop order through the single-file helper. Progress names the current file and its position. If the master is gone, the helper reports that file as failed instead of silently starting another transfer connection.
 - Each helper call creates a fresh remote directory, so equal basenames never overwrite one another.
-- On full success, the clipboard contains all returned remote paths in drop order, separated by line breaks with no trailing line break. A one-file drop copies one path with no trailing line break.
-- On failure or cancellation, sending stops at the current file. The helper's existing cleanup handles that file's partial upload. Previously completed paths are copied to the clipboard, one per line. If the first file fails, the clipboard is left unchanged. The alert identifies the failed file and reason, states the number of copied paths, and retains the helper's transfer-category and cleanup-failure details.
+- On full success, the clipboard contains all returned remote paths in drop order, separated by line breaks with no trailing line break. Result dialogs show at most 10 entries followed by `... N more`; the clipboard is never capped. A one-file drop copies one path with no trailing line break.
+- On failure or cancellation, sending stops at the current file. The helper cleans up that file's partial upload. Previously completed paths are copied to the clipboard, one per line. If the first file fails, the clipboard is left unchanged. The alert identifies the failed file and reason, states the number of copied paths, and shows at most 10 completed paths followed by `... N more`.
 - The host list is `~/.config/ssh-file-drop/hosts` (one alias per line; `#` comments are allowed). The last successful host is stored in `~/.config/ssh-file-drop/last_host`.
 - “+ Add Host...” runs `src/ssh-file-drop-host-candidates` to extract candidates from `~/.ssh/config`. Includes are glob-expanded relative to `~/.ssh`, to a maximum recursion depth of 8. Repeated files are skipped and Match blocks are ignored. Names containing `*`, `?`, or a leading `!`, and names rejected by the transfer helper's host validator, are excluded. Extraction supports simple whitespace-separated Include paths and globs. It does not support quoted paths with spaces, evaluate Match conditions, or expand Host patterns to their actual connection targets.
 - The user can choose a candidate or enter a host manually. Only the selected host is validated and appended to `hosts`. The list remains an explicit selection list and is not synchronized automatically because SSH configuration can include wildcards or Host declarations that are not connection targets.
-- The host picker shows the dropped file names, uses “Transfer” and “Cancel” buttons, and places “+ Add Host...” at the end of the list.
+- The host picker shows at most 10 dropped file names followed by `... N more`, uses “Transfer” and “Cancel” buttons, and places “+ Add Host...” at the end of the list.
 - The helper runs in the background and writes stdout to a temporary file. The app shows a spinner with `progress total steps` and `progress description`, and waits for exit with `kill -0`. Stop raises AppleScript error -128, so the app sends TERM to the helper and waits for it to finish before showing cancellation.
 - The app updates the clipboard only after success. If copying fails, it shows the path and offers a retry without repeating the transfer.
 - Failure messages differ by CATEGORY. For `CONNECT`, the app asks the user to run `ssh HOST` in Terminal to check the connection and host key.
