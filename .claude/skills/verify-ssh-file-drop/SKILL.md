@@ -33,7 +33,7 @@ Example for a non-default reachable SSH server:
 SFD_HOSTNAME=localhost SFD_PORT=2222 SFD_USER="$USER" SFD_IDENTITY="$HOME/.ssh/id_ed25519" bash tests/run.sh
 ```
 
-The runner creates temporary local fixtures and remote test files, then removes its own test artifacts. It reports individual checks and a final passed/failed/skipped count. It exercises the helper's stdout/exit-code contract, transfers, hostile names, input and host rejection, SSH failures, connection timeout, changed-source verification, TERM cancellation, cleanup, and permissions (`0700` directory and `0600` file). It does not exercise the app's Finder/Dock event handling, dialogs, progress UI, or clipboard.
+The runner first executes offline host-candidate extraction tests, then creates temporary local fixtures and remote test files and removes its own test artifacts. The extraction tests cover relative Include paths and globs, repeated files, filtering of wildcard/negated/bad names, ignored Match blocks, explicit-host exclusion, and a missing config. The remote suite reports individual checks and a final passed/failed/skipped count. It exercises the helper's stdout/exit-code contract, transfers, hostile names, input and host rejection, SSH failures, connection timeout, changed-source verification, TERM cancellation, cleanup, and permissions (`0700` directory and `0600` file). It does not exercise the app's Finder/Dock event handling, dialogs, progress UI, or clipboard.
 
 ### Build and launch
 
@@ -48,6 +48,7 @@ This recreates `build/SSH File Drop.app`, compiles the AppleScript, installs the
 ```bash
 test -d 'build/SSH File Drop.app'
 test -x 'build/SSH File Drop.app/Contents/Resources/ssh-file-drop-send'
+test -x 'build/SSH File Drop.app/Contents/Resources/ssh-file-drop-host-candidates'
 /usr/bin/codesign --verify --deep --strict 'build/SSH File Drop.app'
 ```
 
@@ -64,11 +65,11 @@ A successful build or a running process does not prove the drop-to-clipboard wor
 
 Use macOS GUI automation with `/usr/bin/osascript` and System Events for Finder/app interaction, and `/usr/sbin/screencapture -x` for screenshots. GUI scripting may require granting the automation runner Accessibility permission in System Settings. Exercise a real file-open/drop event to the built app, not just the helper:
 
-1. Prepare a reachable SSH host alias in `~/.config/ssh-file-drop/hosts`, and confirm the host works non-interactively from Terminal. Use a harmless test file whose content is safe to transfer.
-2. Use Finder/System Events automation to drop the file onto the built app icon (or its Dock icon). Capture the host picker, select the alias, and confirm the transfer.
+1. Prepare a reachable SSH host alias in `~/.ssh/config` that is not yet in `~/.config/ssh-file-drop/hosts`, and confirm the alias works non-interactively from Terminal. Use a harmless test file whose content is safe to transfer.
+2. Use Finder/System Events automation to drop the file onto the built app icon (or its Dock icon). Capture the host picker, choose “Host を追加…”, capture the candidate picker, select the SSH-config alias, and then capture its appearance in the explicit host picker. Select it and confirm the transfer.
 3. Capture the progress UI while a sufficiently large harmless file is transferring. If testing cancellation, capture the cancellation result and verify that the clipboard is unchanged.
 4. Capture the success dialog, then record `pbpaste` and confirm it contains only the returned remote absolute path. On the host, verify that path exists and has mode `600`; verify its containing dedicated directory has mode `700`.
-5. Retain the automation transcript and screenshots for the drop, host selection, progress, and result. Record the test host alias and file name, but do not include private key contents or other secrets. State which UI cases were not exercised.
+5. Retain the automation transcript and screenshots for the drop, host selection, candidate picker, progress, and result. Record the test host alias and file name, but do not include private key contents or other secrets. State which UI cases were not exercised.
 
 For repeatable event-driven GUI automation without physically dragging, `open -a "$PWD/build/SSH File Drop.app" "$PWD/path/to/test-file"` can send the file-open event to the app; label that as an app-open-event check, not as a Finder/Dock drag. Use screenshots plus `pbpaste` and remote file/mode checks as evidence. Do not infer clipboard success from the success dialog alone.
 

@@ -1,0 +1,128 @@
+#!/bin/bash
+# Lists valid SSH Host aliases from ~/.ssh/config and its Include files.
+# This is a candidate source only; the user-managed hosts file remains the picker list.
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+HERE=$(cd "$(dirname "$0")" && pwd -P)
+VALIDATOR=${SSH_FILE_DROP_HOST_VALIDATOR:-$HERE/ssh-file-drop-send}
+SSH_DIR=${SSH_FILE_DROP_SSH_DIR:-$HOME/.ssh}
+SSH_CONFIG=${SSH_FILE_DROP_CANDIDATES_CONFIG:-$SSH_DIR/config}
+CONFIG_DIR=${SSH_FILE_DROP_CONFIG_DIR:-$HOME/.config/ssh-file-drop}
+HOSTS_FILE=$CONFIG_DIR/hosts
+MAX_DEPTH=8
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/sfd-host-candidates.XXXXXX") || exit 1
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+VISITED=$WORK/visited
+OFFERED=$WORK/offered
+: >"$VISITED"
+: >"$OFFERED"
+
+valid_host() {
+  "$VALIDATOR" --check-host "$1" >/dev/null 2>&1
+}
+
+already_configured() {
+  local line
+  [ -r "$HOSTS_FILE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    case $line in '' | '#'*) continue ;; esac
+    [ "$line" = "$1" ] && return 0
+  done <"$HOSTS_FILE"
+  return 1
+}
+
+add_candidate() {
+  local name=$1
+  case $name in
+    '' | *'*'* | *'?'* | '!'*) return ;;
+  esac
+  valid_host "$name" || return
+  already_configured "$name" && return
+  grep -qxF -- "$name" "$OFFERED" && return
+  printf '%s\n' "$name" >>"$OFFERED"
+}
+
+physical_file() {
+  local dir base
+  dir=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
+  base=${1##*/}
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+include_file() {
+  local pattern=$1 depth=$2 target
+  case $pattern in
+    '~' ) pattern=$HOME ;;
+    '~/'* ) pattern=$HOME/${pattern#~/} ;;
+    /* ) ;;
+    * ) pattern=$SSH_DIR/$pattern ;;
+  esac
+  # Bash expands ordinary Include globs. Config paths containing whitespace are
+  # outside this small parser's supported subset.
+  local matches=()
+  shopt -s nullglob
+  matches=( $pattern )
+  shopt -u nullglob
+  for target in "${matches[@]}"; do
+    [ -f "$target" ] && parse_file "$target" "$depth"
+  done
+}
+
+parse_file() {
+  local file=$1 depth=$2 canonical line directive in_match=0
+  local -a fields=()
+  [ "$depth" -le "$MAX_DEPTH" ] || return 0
+  [ -r "$file" ] || return 0
+  canonical=$(physical_file "$file") || return 0
+  grep -qxF -- "$canonical" "$VISITED" && return 0
+  printf '%s\n' "$canonical" >>"$VISITED"
+  while IFS= read -r line || [ -n "$line" ]; do
+    # OpenSSH comments start with # outside a token. Inline comments are not
+    # needed for alias extraction; discard whole comment lines and trim.
+    line=${line#"${line%%[![:space:]]*}"}
+    case $line in '' | \#*) continue ;; esac
+    # Strip an unquoted trailing comment. Alias and Include tokens are whitespace
+    # separated; quoted paths containing spaces are intentionally not expanded.
+    line=$(printf '%s\n' "$line" | sed 's/[[:space:]]#.*$//')
+    read -r -a fields <<<"$line"
+    [ "${#fields[@]}" -gt 0 ] || continue
+    directive=$(printf '%s' "${fields[0]}" | tr '[:upper:]' '[:lower:]')
+    if [ "$in_match" = 1 ]; then
+      [ "$directive" = match ] && continue
+      continue
+    fi
+    case $directive in
+      match)
+        in_match=1
+        continue
+        ;;
+      host)
+        local i name
+        for ((i = 1; i < ${#fields[@]}; i++)); do
+          name=${fields[$i]}
+          name=${name#\"}; name=${name%\"}
+          name=${name#\'}; name=${name%\'}
+          add_candidate "$name"
+        done
+        ;;
+      include)
+        [ "$in_match" = 1 ] && continue
+        local i include_pattern
+        for ((i = 1; i < ${#fields[@]}; i++)); do
+          include_pattern=${fields[$i]}
+          include_pattern=${include_pattern#\"}; include_pattern=${include_pattern%\"}
+          include_pattern=${include_pattern#\'}; include_pattern=${include_pattern%\'}
+          include_file "$include_pattern" "$((depth + 1))"
+        done
+        ;;
+    esac
+  done <"$file"
+}
+
+if [ -r "$SSH_CONFIG" ]; then
+  parse_file "$SSH_CONFIG" 0
+fi
+cat "$OFFERED"

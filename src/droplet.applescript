@@ -24,6 +24,14 @@ on helperPath()
 	return POSIX path of (path to resource "ssh-file-drop-send")
 end helperPath
 
+on candidatePath()
+	return POSIX path of (path to resource "ssh-file-drop-host-candidates")
+end candidatePath
+
+on runCandidateExtractor()
+	return do shell script quoted form of my candidatePath()
+end runCandidateExtractor
+
 on runHelper(args)
 	set cmd to quoted form of my helperPath()
 	repeat with a in args
@@ -92,16 +100,41 @@ on chooseHost(fileName)
 		set choice to item 1 of picked
 		if choice is not addHostItem then return choice
 
-		set answer to display dialog "~/.ssh/config に書いてある Host の名前を入力してください。" & return & "(例: dev-server)" default answer "" with title appTitle buttons {"キャンセル", "追加"} default button 2 cancel button 1
-		set newHost to text returned of answer
-		try
-			my runHelper({"--add-host", newHost})
-			set preferred to newHost
-		on error
-			display alert appTitle message "この名前は使えません。" & return & "英数字と . _ @ + - だけで、先頭は英数字か _ にしてください。" as warning
-		end try
+		set newHost to my addHost()
+		if newHost is missing value then return missing value
+		set preferred to newHost
 	end repeat
 end chooseHost
+
+on addHost()
+	set candidates to {}
+	try
+		set rawCandidates to my runCandidateExtractor()
+		if rawCandidates is not "" then set candidates to paragraphs of rawCandidates
+	end try
+	set manualItem to "手入力…"
+	if (count of candidates) > 0 then
+		set pickedCandidate to choose from list (candidates & {manualItem}) with title appTitle with prompt "~/.ssh/config の Host 候補を選ぶか、手入力してください。" OK button name "追加" cancel button name "キャンセル"
+		if pickedCandidate is false then return missing value
+		set newHost to item 1 of pickedCandidate
+		if newHost is manualItem then set newHost to my promptForHost()
+	else
+		set newHost to my promptForHost()
+	end if
+	if newHost is missing value then return missing value
+	try
+		my runHelper({"--add-host", newHost})
+		return newHost
+	on error
+		display alert appTitle message "この名前は使えません。" & return & "英数字と . _ @ + - だけで、先頭は英数字か _ にしてください。" as warning
+		return missing value
+	end try
+end addHost
+
+on promptForHost()
+	set answer to display dialog "~/.ssh/config に書いてある Host の名前を入力してください。" & return & "(例: dev-server)" default answer "" with title appTitle buttons {"キャンセル", "追加"} default button 2 cancel button 1
+	return text returned of answer
+end promptForHost
 
 on transfer(hostName, filePath, fileName)
 	set workDir to do shell script "/usr/bin/mktemp -d /tmp/ssh-file-drop-ui.XXXXXX"
